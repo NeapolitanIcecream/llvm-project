@@ -107,9 +107,10 @@ public:
   const std::vector<double> &getData() const { return Data; }
 
   /// Arithmetic operators
-  Embedding &operator+=(const Embedding &RHS);
-  Embedding &operator-=(const Embedding &RHS);
-  Embedding &operator*=(double Factor);
+  LLVM_ABI Embedding operator+(const Embedding &RHS) const;
+  LLVM_ABI Embedding &operator+=(const Embedding &RHS);
+  LLVM_ABI Embedding &operator-=(const Embedding &RHS);
+  LLVM_ABI Embedding &operator*=(double Factor);
 
   /// Adds Src Embedding scaled by Factor with the called Embedding.
   /// Called_Embedding += Src * Factor
