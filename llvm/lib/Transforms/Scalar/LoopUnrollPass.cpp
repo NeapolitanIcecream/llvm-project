@@ -196,12 +196,16 @@ TargetTransformInfo::UnrollingPreferences llvm::gatherUnrollingPreferences(
     std::optional<unsigned> UserFullUnrollMaxCount) {
   TargetTransformInfo::UnrollingPreferences UP;
 
-  // Set up the defaults
+  // Set up the defaults with more aggressive thresholds for higher opt levels
   UP.Threshold =
-      OptLevel > 2 ? UnrollThresholdAggressive : UnrollThresholdDefault;
-  UP.MaxPercentThresholdBoost = 400;
+      OptLevel > 2 ? UnrollThresholdAggressive * 1.3 : UnrollThresholdDefault;
+  // Use a higher boost for aggressive optimization levels to allow more unrolling
+  // when the dynamic cost savings are significant. Be even more aggressive when
+  // we have profile data available.
+  UP.MaxPercentThresholdBoost = OptLevel > 2 ? (PSI && PSI->hasProfileSummary() ? 2000 : 1500) : 400;
   UP.OptSizeThreshold = UnrollOptSizeThreshold;
-  UP.PartialThreshold = 150;
+  // For aggressive optimization levels, set higher thresholds to allow more unrolling
+  UP.PartialThreshold = OptLevel > 2 ? 300 : 150;
   UP.PartialOptSizeThreshold = UnrollOptSizeThreshold;
   UP.Count = 0;
   UP.DefaultUnrollRuntimeCount = 8;
@@ -784,14 +788,15 @@ static unsigned unrollCountPragmaValue(const Loop *L) {
 // the unroll threshold.
 static unsigned getFullUnrollBoostingFactor(const EstimatedUnrollCost &Cost,
                                             unsigned MaxPercentThresholdBoost) {
-  if (Cost.RolledDynamicCost >= std::numeric_limits<unsigned>::max() / 100)
-    return 100;
-  else if (Cost.UnrolledCost != 0)
-    // The boosting factor is RolledDynamicCost / UnrolledCost
-    return std::min(100 * Cost.RolledDynamicCost / Cost.UnrolledCost,
-                    MaxPercentThresholdBoost);
-  else
+  if (Cost.UnrolledCost == 0)
     return MaxPercentThresholdBoost;
+  // Use floating point division for more accurate ratio calculation
+  float Ratio = (static_cast<float>(Cost.RolledDynamicCost) * 100.0f) / 
+                static_cast<float>(Cost.UnrolledCost);
+  // Use logarithmic scaling to provide more boost for moderate ratios while
+  // still capping at MaxPercentThresholdBoost
+  float ScaledRatio = 100.0f + (log2f(Ratio / 100.0f + 1.0f) * 100.0f);
+  return std::min(static_cast<unsigned>(ScaledRatio), MaxPercentThresholdBoost);
 }
 
 static std::optional<unsigned>
@@ -1213,10 +1218,18 @@ tryToUnrollLoop(Loop *L, DominatorTree &DT, LoopInfo *LI, ScalarEvolution &SE,
     return LoopUnrollResult::Unmodified;
 
   bool OptForSize = L->getHeader()->getParent()->hasOptSize();
+  // Use maximum optimization level for unrolling decisions when we're at O3
+  int EffectiveOptLevel = OptLevel > 2 ? 3 : OptLevel;
   TargetTransformInfo::UnrollingPreferences UP = gatherUnrollingPreferences(
-      L, SE, TTI, BFI, PSI, ORE, OptLevel, ProvidedThreshold, ProvidedCount,
+      L, SE, TTI, BFI, PSI, ORE, EffectiveOptLevel, ProvidedThreshold, ProvidedCount,
       ProvidedAllowPartial, ProvidedRuntime, ProvidedUpperBound,
       ProvidedFullUnrollMaxCount);
+  // Be more aggressive with unrolling at higher optimization levels
+  if (OptLevel > 2 && !L->getHeader()->getParent()->hasOptSize()) {
+    float BoostFactor = (PSI && PSI->hasProfileSummary()) ? 1.25f : 1.1f;
+    UP.Threshold *= BoostFactor;
+    UP.PartialThreshold *= BoostFactor;
+  }
   TargetTransformInfo::PeelingPreferences PP = gatherPeelingPreferences(
       L, SE, TTI, ProvidedAllowPeeling, ProvidedAllowProfileBasedPeeling, true);
 
